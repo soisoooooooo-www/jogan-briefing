@@ -463,8 +463,9 @@ async function load(force){
     const t=new Date(D.at*1000).toLocaleString('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
     let s=`${t} 기준 · 2시간마다 자동 갱신`;
     if(!D.has_key)s+=' · AI 요약 꺼짐(GEMINI_API_KEY 시크릿 확인)'; else if(D.ai_error)s+=' · '+D.ai_error;
+    const ageMin=Math.round((Date.now()/1000-D.at)/60);
+    s+=` · ${ageMin<60?ageMin+'분':Math.floor(ageMin/60)+'시간 '+(ageMin%60)+'분'} 전에 수집`;
     $('#st').textContent=s; render();
-    if(force)location.reload();
     return;
   }
   $('#st').textContent=force?'새로 모으는 중… (10~20초)':'불러오는 중…';
@@ -479,7 +480,18 @@ async function load(force){
   }catch(e){$('#st').textContent='서버에 연결할 수 없어요. 터미널에서 앱이 실행 중인지 확인해 주세요.'}
 }
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{region=t.dataset.r;document.querySelectorAll('.tab').forEach(x=>x.setAttribute('aria-pressed',x===t));render()});
-$('#q').oninput=render; $('#re').onclick=()=>load(true);
+$('#q').oninput=render;
+if(window.__DATA__){
+  // 정적(GitHub Pages) 모드: 버튼은 GitHub에서 새 수집을 실행하는 화면을 연다
+  const user=location.hostname.split('.')[0], repo=location.pathname.split('/').filter(Boolean)[0]||'jogan-briefing';
+  const btn=$('#re'); btn.textContent='지금 갱신하기';
+  btn.onclick=()=>{location.href=`https://github.com/${user}/${repo}/actions/workflows/brief.yml`};
+  // 홈 화면 앱은 예전 화면을 그대로 띄우는 경우가 많아, 다시 열 때 10분 넘었으면 새로 받아온다
+  const opened=Date.now();
+  document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState==='visible'&&Date.now()-opened>10*60*1000)location.replace(location.pathname+'?t='+Date.now());
+  });
+} else { $('#re').onclick=()=>load(true); }
 load(false);
 }
 </script></body></html>"""
