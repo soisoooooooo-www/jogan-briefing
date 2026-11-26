@@ -471,6 +471,19 @@ button.go{font:700 15px "Noto Sans KR";padding:10px 16px;border:0;background:var
 .it:first-of-type a.t{font:900 19px/1.35 "Noto Serif KR",serif}
 .err{color:var(--acc);font-size:14px}
 .hide{display:none}
+.chips{display:none;gap:6px;overflow-x:auto;position:sticky;top:0;z-index:5;background:var(--bg);padding:10px 0;margin-top:14px;scrollbar-width:none;border-bottom:1px solid var(--hair)}
+.chips::-webkit-scrollbar,.grid::-webkit-scrollbar{display:none}
+.chip{flex:none;font:500 14px "Noto Sans KR",sans-serif;padding:7px 13px;min-height:36px;border:1px solid var(--hair);border-radius:999px;background:transparent;color:var(--ink);cursor:pointer;white-space:nowrap}
+.chip[aria-current=true]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.count{flex:none;align-self:center;font-size:12px;color:var(--mute);padding:0 4px 0 2px}
+@media(max-width:700px){
+ .chips{display:flex}
+ .grid{position:relative;display:flex;align-items:flex-start;gap:18px;overflow-x:auto;scroll-snap-type:x mandatory;overscroll-behavior-x:contain;
+  margin:0 calc(-1*max(4vw,16px));padding:0 max(4vw,16px) 40px;scroll-padding-inline:max(4vw,16px);scrollbar-width:none}
+ .paper{flex:0 0 100%;scroll-snap-align:start;scroll-snap-stop:always;border-top:0;padding-top:12px}
+ .it a.t{font-size:17px}
+ .brief{margin:16px 0 0}
+}
 </style></head><body>
 <div class="wrap">
 <header><h1>조간 브리핑</h1><div class="date" id="date"></div></header>
@@ -481,6 +494,7 @@ button.go{font:700 15px "Noto Sans KR";padding:10px 16px;border:0;background:var
  <div class="status" id="st">불러오는 중…</div>
 </div>
 <section class="brief hide" id="brief"></section>
+<nav class="chips" id="chips" aria-label="신문사"></nav>
 <main class="grid" id="grid"></main>
 </div>
 <script>
@@ -507,8 +521,41 @@ function render(){
       const a=AI[it.id]||{}, ko=a.ko_title&&a.ko_title!==it.title;
       const href=/^https?:\/\//.test(it.link)?esc(it.link):'#';
       return `<div class="it"><a class="t" href="${href}" target="_blank" rel="noopener">${esc(ko?a.ko_title:it.title)}</a>${ko?`<div class="o">${esc(it.title)}</div>`:''}<p>${esc(a.summary||it.summary)}</p><time>${ago(it.ts)}</time></div>`}).join('');
-    return `<section class="paper"><div class="ph"><h2>${esc(p.paper)}</h2><span class="via">${esc(p.via||'')}</span></div>${body}</section>`}).join('')||'<p>일치하는 기사가 없어요.</p>';
+    return `<section class="paper" data-p="${esc(p.paper)}"><div class="ph"><h2>${esc(p.paper)}</h2><span class="via">${esc(p.via||'')}</span></div>${body}</section>`}).join('')||'<p>일치하는 기사가 없어요.</p>';
+  const cards=[...document.querySelectorAll('.paper')];
+  $('#chips').innerHTML=cards.map((c,i)=>`<button class="chip" data-i="${i}" aria-current="${i===0}">${esc(c.dataset.p)}</button>`).join('')+`<span class="count" id="cnt">1/${cards.length}</span>`;
+  $('#grid').scrollLeft=0; cur=0;
 }
+let cur=0, tmr=null;
+const cardsNow=()=>[...document.querySelectorAll('.paper')];
+const padL=()=>parseFloat(getComputedStyle($('#grid')).paddingLeft)||0;
+function mark(i){
+  cur=i;
+  document.querySelectorAll('.chip').forEach(c=>c.setAttribute('aria-current',String(+c.dataset.i===i)));
+  const chip=document.querySelector(`.chip[data-i="${i}"]`); const bar=$('#chips');
+  if(chip) bar.scrollTo({left:chip.offsetLeft-bar.clientWidth/2+chip.clientWidth/2,behavior:'smooth'});
+  const n=$('#cnt'); if(n) n.textContent=`${i+1}/${cardsNow().length}`;
+}
+function topOfCards(){
+  // 옆으로 넘겼는데 화면이 아래쪽에 있으면 새 신문 맨 위로 올려 준다
+  const y=$('#chips').getBoundingClientRect().top+window.scrollY;
+  if(window.scrollY>y+4) window.scrollTo({top:y,behavior:'smooth'});
+}
+$('#grid').addEventListener('scroll',()=>{
+  clearTimeout(tmr);
+  tmr=setTimeout(()=>{
+    const cs=cardsNow(); if(!cs.length) return;
+    const x=$('#grid').scrollLeft+padL();
+    let best=0; cs.forEach((c,i)=>{ if(Math.abs(c.offsetLeft-x)<Math.abs(cs[best].offsetLeft-x)) best=i; });
+    if(best!==cur){ mark(best); topOfCards(); }
+  },110);
+},{passive:true});
+$('#chips').addEventListener('click',e=>{
+  const b=e.target.closest('.chip'); if(!b) return;
+  const c=cardsNow()[+b.dataset.i]; if(!c) return;
+  $('#grid').scrollTo({left:c.offsetLeft-padL(),behavior:'smooth'});
+  mark(+b.dataset.i); topOfCards();
+});
 async function load(force){
   if(window.__DATA__){
     D=window.__DATA__;
