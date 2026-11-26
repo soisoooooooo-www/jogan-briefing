@@ -495,8 +495,9 @@ function render(){
   const b=ai.briefing;
   if(b && !q){
     const part=(k,t)=>(region==='all'||region===k)&&b[k]?.length?`<div><h3>${t}</h3><ol>${b[k].map(x=>`<li><b>${esc(x.headline)}</b><span>${esc(x.detail)}</span></li>`).join('')}</ol></div>`:'';
-    $('#brief').innerHTML=`<h2>오늘의 핵심</h2><div class="cols2">${part('us','미국 신문들이 주목한 것')}${part('kr','한국 신문들이 주목한 것')}</div>`;
-    $('#brief').classList.remove('hide');
+    const parts=part('us','미국 신문들이 주목한 것')+part('kr','한국 신문들이 주목한 것');
+    $('#brief').innerHTML=`<h2>오늘의 핵심</h2><div class="cols2">${parts}</div>`;
+    $('#brief').classList.toggle('hide',!parts);
   } else $('#brief').classList.add('hide');
   const papers=[...(region!=='kr'?D.data.us:[]),...(region!=='us'?D.data.kr:[])];
   $('#grid').innerHTML=papers.map(p=>{
