@@ -218,41 +218,59 @@ def fetch_paper(name, urls):
 
 # ───────────────────────── 제미나이 요약(선택) ─────────────────────────
 
+MODEL_CHAIN = [MODEL] + [m for m in ("gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash") if m != MODEL]
 GEMINI_ENDPOINTS = [
-    # Google AI Studio 키 (보통 AIza… 로 시작)
+    # Google AI Studio 키
     "https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent",
-    # Vertex AI 익스프레스 모드 키 (AQ.… 로 시작하는 경우가 있음)
+    # Vertex AI 익스프레스 모드 키 — 위 주소가 '키가 안 맞는다'고 할 때만 시도
     "https://aiplatform.googleapis.com/v1/publishers/google/models/{m}:generateContent",
 ]
+BUSY = (429, 500, 502, 503, 504)   # 서버 혼잡·일시 오류 → 잠시 후 재시도, 그래도 안 되면 다른 모델
 _good_endpoint = None
+
+
+def _call(url, body):
+    req = urllib.request.Request(url, data=body, headers={"x-goog-api-key": API_KEY, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=180, context=SSL_CTX) as r:
+            return json.loads(r.read()), None, None
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")
+        try:
+            detail = json.loads(detail)["error"]["message"]
+        except Exception:
+            pass
+        return None, e.code, detail[:120]
 
 
 def gemini(prompt):
     global _good_endpoint
     body = json.dumps({"contents": [{"role": "user", "parts": [{"text": prompt}]}],
                        "generationConfig": {"responseMimeType": "application/json"}}).encode()
-    endpoints = [_good_endpoint] if _good_endpoint else GEMINI_ENDPOINTS
-    errors = []
+    last = ""
     res = None
-    for ep in endpoints:
-        req = urllib.request.Request(ep.format(m=MODEL), data=body,
-                                     headers={"x-goog-api-key": API_KEY, "Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=180, context=SSL_CTX) as r:
-                res = json.loads(r.read())
-            _good_endpoint = ep
+    for model in MODEL_CHAIN:
+        endpoints = [_good_endpoint] if _good_endpoint else GEMINI_ENDPOINTS
+        for ep in endpoints:
+            for wait in (0, 8, 20):          # 혼잡하면 최대 두 번 더 기다렸다 재시도
+                if wait:
+                    time.sleep(wait)
+                res, code, detail = _call(ep.format(m=model), body)
+                if res is not None:
+                    _good_endpoint = ep
+                    break
+                last = f"{model}: HTTP {code} — {detail}"
+                print("  제미나이 재시도 사유:", last)
+                if code not in BUSY:
+                    break
+            if res is not None or code in BUSY or code == 404:
+                break                        # 혼잡/모델 없음이면 다른 주소 말고 다음 모델로
+        if res is not None:
             break
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "replace")
-            try:
-                detail = json.loads(detail)["error"]["message"]
-            except Exception:
-                pass
-            errors.append(f"HTTP {e.code} — {detail[:140]}")
-            if e.code == 429:  # 한도 초과는 다른 주소로 가도 소용없음
-                break
+        if code not in BUSY and code != 404:
+            break                            # 키 문제 등은 모델을 바꿔도 소용없음
     if res is None:
-        raise RuntimeError(" / ".join(errors))
+        raise RuntimeError(last)
     parts = (res.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
     return "".join(p.get("text", "") for p in parts if not p.get("thought"))
 
