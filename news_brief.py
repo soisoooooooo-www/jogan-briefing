@@ -246,7 +246,7 @@ def _call(url, body):
 def gemini(prompt):
     global _good_endpoint
     body = json.dumps({"contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                       "generationConfig": {"responseMimeType": "application/json"}}).encode()
+                       "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 32768}}).encode()
     last = ""
     res = None
     for model in MODEL_CHAIN:
@@ -275,26 +275,65 @@ def gemini(prompt):
     return "".join(p.get("text", "") for p in parts if not p.get("thought"))
 
 
-def ai_enrich(snapshot):
+def _parse_json(text):
+    text = text.strip()
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except Exception:
+        m = re.search(r"\{.*\}", text, re.S)
+        if not m:
+            raise
+        return json.loads(m.group(0))
+
+
+def _enrich_region(region, papers):
     lines = []
-    for region in ("us", "kr"):
-        for p in snapshot[region]:
-            for it in p["items"]:
-                lines.append(f'[{it["id"]}] ({region.upper()} · {p["paper"]}) {it["title"]} || {it["summary"]}')
+    for p in papers:
+        for it in p["items"]:
+            lines.append(f'[{it["id"]}] ({p["paper"]}) {it["title"]} || {it["summary"][:160]}')
+    if not lines:
+        return {"briefing": [], "items": {}}
+    where = "미국" if region == "us" else "한국"
     prompt = (
-        "아래는 오늘 미국(US)과 한국(KR) 주요 일간지의 헤드라인 목록입니다. 형식: [id] (지역 · 신문) 제목 || RSS 요약\n\n"
+        f"아래는 오늘 {where} 주요 일간지의 헤드라인 목록입니다. 형식: [id] (신문) 제목 || RSS 요약\n\n"
         + "\n".join(lines)
-        + "\n\n다음 JSON만 출력하세요(코드블록·설명 없이):\n"
-        '{"briefing":{"us":[{"headline":"...","detail":"..."}],"kr":[{"headline":"...","detail":"..."}]},'
-        '"items":{"<id>":{"ko_title":"...","summary":"..."}}}\n'
-        "규칙: briefing은 지역별로 여러 신문이 함께 다룬 핵심 이슈 3~5개, headline은 한 줄, detail은 1~2문장이며 "
-        "어느 신문들이 다뤘는지 괄호로 표기. items에는 모든 id를 포함하고 ko_title은 한국어 제목(한국 기사는 원제 유지), "
-        "summary는 제공된 정보만으로 쓴 한국어 한 문장 요약(정보가 부족하면 제목을 풀어 쓰되 추측 금지). "
-        "언론사 간 논조 차이가 뚜렷하면 detail에 짧게 언급."
+        + "\n\n다음 JSON 하나만 출력하세요(코드블록·설명 없이):\n"
+        '{"briefing":[{"headline":"...","detail":"..."}],"items":{"<id>":{"ko_title":"...","summary":"..."}}}\n'
+        "규칙:\n"
+        "- briefing: 여러 신문이 함께 다룬 핵심 이슈 3~5개. headline 한 줄, detail은 1~2문장이며 끝에 다룬 신문을 괄호로. "
+        "논조 차이가 뚜렷하면 짧게 언급.\n"
+        + ("- items의 ko_title: 자연스러운 한국어 제목.\n" if region == "us" else "- items의 ko_title: 원제 그대로.\n")
+        + "- items의 summary: 제공된 정보만으로 쓴 한국어 한 문장(60자 이내). 추측 금지.\n"
+        "- 모든 id를 빠짐없이 포함. 문자열 안의 큰따옴표는 작은따옴표로 바꿀 것."
     )
-    text = gemini(prompt)
-    m = re.search(r"\{.*\}", text, re.S)
-    return json.loads(m.group(0))
+    last = None
+    for _ in range(2):                     # 형식이 깨진 답이 오면 한 번 더 요청
+        try:
+            data = _parse_json(gemini(prompt))
+            return {"briefing": data.get("briefing") or [], "items": data.get("items") or {}}
+        except (ValueError, json.JSONDecodeError) as e:
+            last = e
+            print(f"  [{where}] 응답 형식 오류, 재시도: {e}")
+    raise RuntimeError(f"{where} 요약 형식 오류: {last}")
+
+
+def ai_enrich(snapshot):
+    out = {"briefing": {}, "items": {}}
+    errors = []
+    for region in ("us", "kr"):
+        try:
+            r = _enrich_region(region, snapshot[region])
+            out["briefing"][region] = r["briefing"]
+            out["items"].update(r["items"])
+        except Exception as e:
+            errors.append(str(e)[:160])
+            out["briefing"][region] = []
+    if not out["items"] and errors:
+        raise RuntimeError(" / ".join(errors))
+    if errors:
+        out["partial_error"] = " / ".join(errors)
+    return out
 
 
 # ───────────────────────── 상태 & 캐시 ─────────────────────────
@@ -330,6 +369,8 @@ def refresh(force=False):
                 ai = ai_enrich(snap)
                 with LOCK:
                     STATE["ai"] = ai
+                    if ai.get("partial_error"):
+                        STATE["ai_error"] = "일부 요약 실패: " + ai["partial_error"]
             except Exception as e:
                 with LOCK:
                     STATE["ai_error"] = f"AI 요약 실패: {describe(e) if isinstance(e, urllib.error.URLError) else e}"
