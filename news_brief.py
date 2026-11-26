@@ -281,7 +281,8 @@ SCHEMA = {
     "type": "OBJECT",
     "properties": {
         "briefing": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
-            "headline": {"type": "STRING"}, "detail": {"type": "STRING"}}, "required": ["headline", "detail"]}},
+            "headline": {"type": "STRING"}, "detail": {"type": "STRING"}, "outlook": {"type": "STRING"}},
+            "required": ["headline", "detail", "outlook"]}},
         "items": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
             "id": {"type": "STRING"}, "ko_title": {"type": "STRING"}, "summary": {"type": "STRING"}},
             "required": ["id", "summary"]}},
@@ -336,6 +337,11 @@ def _enrich_region(region, papers):
         + "\n\nJSON으로 답하세요.\n"
         "- briefing: 여러 신문이 함께 다룬 핵심 이슈 3~5개. headline 한 줄, detail은 1~2문장이며 끝에 다룬 신문을 괄호로. "
         "논조 차이가 뚜렷하면 짧게 언급.\n"
+        "- briefing의 outlook: 이 이슈로 앞으로 일어날 수 있는 일과 기대효과·파급효과를 2~3문장으로. "
+        "가능한 전개를 '~할 가능성', '~가 관건'처럼 조건과 불확실성을 드러내 쓰고, 단정하지 말 것. "
+        "정치적 쟁점은 특정 입장을 지지하거나 평가하지 말고 각 측이 예상하는 결과를 균형 있게. "
+        + ("미국 이슈는 한국(경제·산업·외교)에 미칠 수 있는 영향이 있으면 한 문장 포함. " if region == "us" else "")
+        + "기사에 없는 구체적 수치·날짜를 지어내지 말 것.\n"
         "- items: 모든 기사를 빠짐없이, 각각 {id, ko_title, summary}.\n"
         + ("  ko_title은 자연스러운 한국어 제목.\n" if region == "us" else "  ko_title은 빈 문자열로 두세요(원제를 그대로 씀).\n")
         + "  summary는 제공된 정보만으로 쓴 한국어 한 문장(60자 이내), 추측 금지.\n"
@@ -458,7 +464,10 @@ button.go{font:700 15px "Noto Sans KR";padding:10px 16px;border:0;background:var
 .brief h2{font:900 22px "Noto Serif KR",serif;margin:0 0 10px}
 .cols2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:22px}
 .brief h3{font-size:14px;color:var(--acc);margin:0 0 6px}
-.brief ol{margin:0;padding-left:20px}.brief li{margin:6px 0}.brief b{display:block}.brief span{color:var(--mute);font-size:14px}
+.brief ol{margin:0;padding-left:20px}.brief li{margin:10px 0}.brief b{display:block}.brief span{color:var(--mute);font-size:14px;display:block}
+.brief .ol{margin-top:6px;font-size:14px;line-height:1.55;color:var(--ink);opacity:.88}
+.brief .ol em{font-style:normal;font-weight:700;color:var(--acc);font-size:12px;margin-right:6px;white-space:nowrap}
+.brief .note{font-size:12px;color:var(--mute);margin:12px 0 0}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,360px),1fr));gap:0 28px;padding-bottom:40px}
 .paper{padding:18px 0;border-top:2px solid var(--rule)}
 .ph{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:6px}
@@ -508,9 +517,9 @@ function render(){
   const q=$('#q').value.trim().toLowerCase(), ai=D.ai||{}, AI=ai.items||{};
   const b=ai.briefing;
   if(b && !q){
-    const part=(k,t)=>(region==='all'||region===k)&&b[k]?.length?`<div><h3>${t}</h3><ol>${b[k].map(x=>`<li><b>${esc(x.headline)}</b><span>${esc(x.detail)}</span></li>`).join('')}</ol></div>`:'';
+    const part=(k,t)=>(region==='all'||region===k)&&b[k]?.length?`<div><h3>${t}</h3><ol>${b[k].map(x=>`<li><b>${esc(x.headline)}</b><span>${esc(x.detail)}</span>${x.outlook?`<div class="ol"><em>전망</em>${esc(x.outlook)}</div>`:''}</li>`).join('')}</ol></div>`:'';
     const parts=part('us','미국 신문들이 주목한 것')+part('kr','한국 신문들이 주목한 것');
-    $('#brief').innerHTML=`<h2>오늘의 핵심</h2><div class="cols2">${parts}</div>`;
+    $('#brief').innerHTML=`<h2>오늘의 핵심</h2><div class="cols2">${parts}</div><p class="note">전망은 기사 내용을 바탕으로 AI가 추정한 가능성이에요. 실제 전개와 다를 수 있어요.</p>`;
     $('#brief').classList.toggle('hide',!parts);
   } else $('#brief').classList.add('hide');
   const papers=[...(region!=='kr'?D.data.us:[]),...(region!=='us'?D.data.kr:[])];
