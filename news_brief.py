@@ -33,6 +33,40 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("NEWS_PORT", "8765"))
 PER_PAPER = int(os.environ.get("NEWS_PER_PAPER", "8"))
+CANDIDATES = PER_PAPER + 5   # 스포츠·연예를 뺀 뒤에도 PER_PAPER개가 남도록 넉넉히 받아 둠
+# 뺄 분야: sports, entertainment (쉼표로 구분, 빈 값이면 아무것도 빼지 않음)
+EXCLUDE = {x.strip() for x in os.environ.get("NEWS_EXCLUDE", "sports,entertainment").split(",") if x.strip()}
+
+# 1단계: 주소·분류 태그·매체 표시로 거르기
+_PATH_RE = {
+    "sports": re.compile(r"/(sports?|baseball|football|soccer|golf|basketball|esports)(/|\.|$)", re.I),
+    "entertainment": re.compile(r"/(entertainments?|enter|ent|star|stars|celeb|celebrity|arts|style|movies?|music|"
+                                r"television|tv|broadcast|culture/entertainment|showbiz|people)(/|\.|$)", re.I),
+}
+_CAT_WORDS = {
+    "sports": ("sport", "스포츠", "야구", "축구", "골프", "농구", "배구"),
+    "entertainment": ("entertain", "연예", "celebrit", "movies", "television", "music", "arts", "방송", "가요", "영화"),
+}
+_TEXT_MARKS = {
+    "sports": ("KBO", "K리그", "프로야구", "MLB", "NBA", "NFL", "EPL", "프리미어리그", "챔피언스리그", "스포츠조선", "일간스포츠",
+               "스포츠서울", "스포츠경향", "스포츠동아", "Super Bowl", "World Series"),
+    "entertainment": ("OSEN", "엑스포츠뉴스", "스타뉴스", "텐아시아", "마이데일리", "TV리포트", "스포츠조선", "뉴스엔",
+                      "아이돌", "걸그룹", "보이그룹", "컴백", "예능", "드라마", "시청률", "박스오피스", "Box Office", "Grammy", "Oscar"),
+}
+
+
+def rule_section(it):
+    link = it.get("link", "")
+    cats = " ".join(it.get("cats", [])).lower()
+    text = f'{it.get("title", "")} {it.get("summary", "")[:80]}'
+    for sec in EXCLUDE:
+        if sec in _PATH_RE and _PATH_RE[sec].search(urllib.parse.urlparse(link).path):
+            return sec
+        if any(w.lower() in cats for w in _CAT_WORDS.get(sec, ())):
+            return sec
+        if any(w in text for w in _TEXT_MARKS.get(sec, ())):
+            return sec
+    return None
 CACHE_SEC = 600
 MAX_AGE_HOURS = 72          # 피드의 최신 기사가 이보다 오래되면 '죽은 피드'로 보고 다음 후보로
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
@@ -167,6 +201,8 @@ def parse_feed(data, is_gnews):
             name = local(c.tag)
             if name == "link" and c.get("href"):
                 f.setdefault("link", c.get("href"))
+            elif name in ("category", "subject"):
+                f.setdefault("_cats", []).append((c.text or c.get("term") or "").strip())
             elif name not in f:
                 f[name] = (c.text or "").strip()
         title = clean(f.get("title"), 300)
@@ -178,7 +214,7 @@ def parse_feed(data, is_gnews):
             desc = ""  # 구글 뉴스 설명은 링크 목록이라 쓸모없음
         d = parse_date(f.get("pubDate") or f.get("published") or f.get("updated") or f.get("date"))
         items.append({"title": title, "summary": clean(desc), "link": f.get("link", ""),
-                      "ts": d.timestamp() if d else None})
+                      "ts": d.timestamp() if d else None, "cats": f.get("_cats", [])})
     return items
 
 
@@ -210,7 +246,7 @@ def fetch_paper(name, urls):
             if is_g:  # 구글 뉴스 검색 결과는 최신순으로
                 out.sort(key=lambda i: i["ts"] or 0, reverse=True)
             return {"paper": name, "via": "Google News" if is_g else "공식 RSS",
-                    "items": out[:PER_PAPER], "error": None}
+                    "items": [i for i in out if not rule_section(i)][:CANDIDATES], "error": None}
         except Exception as e:
             errors.append(describe(e))
     return {"paper": name, "via": None, "items": [], "error": " / ".join(errors) or "실패"}
@@ -284,8 +320,9 @@ SCHEMA = {
             "headline": {"type": "STRING"}, "detail": {"type": "STRING"}, "outlook": {"type": "STRING"}},
             "required": ["headline", "detail", "outlook"]}},
         "items": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
-            "id": {"type": "STRING"}, "ko_title": {"type": "STRING"}, "summary": {"type": "STRING"}},
-            "required": ["id", "summary"]}},
+            "id": {"type": "STRING"}, "ko_title": {"type": "STRING"}, "summary": {"type": "STRING"},
+            "section": {"type": "STRING", "enum": ["news", "sports", "entertainment"]}},
+            "required": ["id", "summary", "section"]}},
     },
     "required": ["briefing", "items"],
 }
@@ -335,14 +372,16 @@ def _enrich_region(region, papers):
         f"아래는 오늘 {where} 주요 일간지의 헤드라인 목록입니다. 형식: [id] (신문) 제목 || RSS 요약\n\n"
         + "\n".join(lines)
         + "\n\nJSON으로 답하세요.\n"
-        "- briefing: 여러 신문이 함께 다룬 핵심 이슈 3~5개. headline 한 줄, detail은 1~2문장이며 끝에 다룬 신문을 괄호로. "
+        "- briefing: section이 news인 기사들 중 여러 신문이 함께 다룬 핵심 이슈 3~5개. headline 한 줄, detail은 1~2문장이며 끝에 다룬 신문을 괄호로. "
         "논조 차이가 뚜렷하면 짧게 언급.\n"
         "- briefing의 outlook: 이 이슈로 앞으로 일어날 수 있는 일과 기대효과·파급효과를 2~3문장으로. "
         "가능한 전개를 '~할 가능성', '~가 관건'처럼 조건과 불확실성을 드러내 쓰고, 단정하지 말 것. "
         "정치적 쟁점은 특정 입장을 지지하거나 평가하지 말고 각 측이 예상하는 결과를 균형 있게. "
         + ("미국 이슈는 한국(경제·산업·외교)에 미칠 수 있는 영향이 있으면 한 문장 포함. " if region == "us" else "")
         + "기사에 없는 구체적 수치·날짜를 지어내지 말 것.\n"
-        "- items: 모든 기사를 빠짐없이, 각각 {id, ko_title, summary}.\n"
+        "- items: 모든 기사를 빠짐없이, 각각 {id, ko_title, summary, section}.\n"
+        "  section은 스포츠(경기·선수·구단·리그) 기사면 sports, 연예·방송·영화·음악·셀럽 기사면 entertainment, 그 밖은 news. "
+        "스포츠·연예 산업의 경제·정책 기사(예: 중계권 규제, 구단 매각 세금)는 news.\n"
         + ("  ko_title은 자연스러운 한국어 제목.\n" if region == "us" else "  ko_title은 빈 문자열로 두세요(원제를 그대로 씀).\n")
         + "  summary는 제공된 정보만으로 쓴 한국어 한 문장(60자 이내), 추측 금지.\n"
         "- 어떤 문자열에도 큰따옴표(\")를 쓰지 말고 필요하면 작은따옴표(')를 쓰세요."
@@ -367,7 +406,7 @@ def _enrich_region(region, papers):
         items = {}
         for it in raw:
             if isinstance(it, dict) and it.get("id"):
-                d = {"summary": it.get("summary", "")}
+                d = {"summary": it.get("summary", ""), "section": it.get("section") or "news"}
                 if region == "us" and it.get("ko_title"):
                     d["ko_title"] = it["ko_title"]
                 items[it["id"]] = d
@@ -382,6 +421,8 @@ def ai_enrich(snapshot):
         try:
             r = _enrich_region(region, snapshot[region])
             out["briefing"][region] = r["briefing"]
+            for k, v in r["items"].items():
+                out.setdefault("sections", {})[k] = v.pop("section", "news")
             out["items"].update(r["items"])
         except Exception as e:
             errors.append(str(e)[:160])
@@ -409,7 +450,18 @@ def collect():
             for it in p["items"]:
                 n += 1
                 it["id"] = f"a{n}"
+                it.pop("cats", None)
+            if not API_KEY:
+                p["items"] = p["items"][:PER_PAPER]
     return snap
+
+
+def trim(snap, ai):
+    """제미나이가 스포츠·연예로 분류한 기사를 빼고 신문사별 PER_PAPER개로 자름."""
+    sec = (ai or {}).get("sections", {})
+    for r in snap:
+        for p in snap[r]:
+            p["items"] = [i for i in p["items"] if sec.get(i["id"], "news") not in EXCLUDE][:PER_PAPER]
 
 
 def refresh(force=False):
@@ -424,11 +476,14 @@ def refresh(force=False):
         if API_KEY:
             try:
                 ai = ai_enrich(snap)
+                trim(snap, ai)
                 with LOCK:
+                    STATE["data"] = snap
                     STATE["ai"] = ai
                     if ai.get("partial_error"):
                         STATE["ai_error"] = "일부 요약 실패: " + ai["partial_error"]
             except Exception as e:
+                trim(snap, None)
                 with LOCK:
                     STATE["ai_error"] = f"AI 요약 실패: {describe(e) if isinstance(e, urllib.error.URLError) else e}"
     finally:
