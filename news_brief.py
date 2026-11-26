@@ -243,10 +243,12 @@ def _call(url, body):
         return None, e.code, detail[:120]
 
 
-def gemini(prompt):
+def gemini(prompt, schema=None):
     global _good_endpoint
-    body = json.dumps({"contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                       "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 32768}}).encode()
+    cfg = {"responseMimeType": "application/json", "maxOutputTokens": 32768}
+    if schema:
+        cfg["responseSchema"] = schema
+    body = json.dumps({"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": cfg}).encode()
     last = ""
     res = None
     for model in MODEL_CHAIN:
@@ -275,46 +277,95 @@ def gemini(prompt):
     return "".join(p.get("text", "") for p in parts if not p.get("thought"))
 
 
+SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "briefing": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+            "headline": {"type": "STRING"}, "detail": {"type": "STRING"}}, "required": ["headline", "detail"]}},
+        "items": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+            "id": {"type": "STRING"}, "ko_title": {"type": "STRING"}, "summary": {"type": "STRING"}},
+            "required": ["id", "summary"]}},
+    },
+    "required": ["briefing", "items"],
+}
+
+
 def _parse_json(text):
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
     try:
         return json.loads(text)
     except Exception:
         m = re.search(r"\{.*\}", text, re.S)
-        if not m:
-            raise
-        return json.loads(m.group(0))
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                pass
+    # 마지막 수단: 깨진 답에서 읽을 수 있는 항목만 건지기
+    items = []
+    for m in re.finditer(r'\{[^{}]*?"id"\s*:\s*"(a\d+)"[^{}]*?\}', text):
+        try:
+            items.append(json.loads(m.group(0)))
+        except Exception:
+            sm = re.search(r'"summary"\s*:\s*"(.*?)"\s*[,}]', m.group(0))
+            if sm:
+                items.append({"id": m.group(1), "summary": sm.group(1)})
+    briefing = []
+    for m in re.finditer(r'\{\s*"headline"\s*:\s*"(.*?)"\s*,\s*"detail"\s*:\s*"(.*?)"\s*\}', text):
+        briefing.append({"headline": m.group(1), "detail": m.group(2)})
+    if not items and not briefing:
+        raise ValueError("응답을 JSON으로 읽을 수 없음")
+    return {"briefing": briefing, "items": items, "_salvaged": True}
+
+
+def _q(t):
+    return (t or "").replace('"', "'").replace("\\", " ")
 
 
 def _enrich_region(region, papers):
     lines = []
     for p in papers:
         for it in p["items"]:
-            lines.append(f'[{it["id"]}] ({p["paper"]}) {it["title"]} || {it["summary"][:160]}')
+            lines.append(f'[{it["id"]}] ({p["paper"]}) {_q(it["title"])} || {_q(it["summary"][:160])}')
     if not lines:
         return {"briefing": [], "items": {}}
     where = "미국" if region == "us" else "한국"
     prompt = (
         f"아래는 오늘 {where} 주요 일간지의 헤드라인 목록입니다. 형식: [id] (신문) 제목 || RSS 요약\n\n"
         + "\n".join(lines)
-        + "\n\n다음 JSON 하나만 출력하세요(코드블록·설명 없이):\n"
-        '{"briefing":[{"headline":"...","detail":"..."}],"items":{"<id>":{"ko_title":"...","summary":"..."}}}\n'
-        "규칙:\n"
+        + "\n\nJSON으로 답하세요.\n"
         "- briefing: 여러 신문이 함께 다룬 핵심 이슈 3~5개. headline 한 줄, detail은 1~2문장이며 끝에 다룬 신문을 괄호로. "
         "논조 차이가 뚜렷하면 짧게 언급.\n"
-        + ("- items의 ko_title: 자연스러운 한국어 제목.\n" if region == "us" else "- items의 ko_title: 원제 그대로.\n")
-        + "- items의 summary: 제공된 정보만으로 쓴 한국어 한 문장(60자 이내). 추측 금지.\n"
-        "- 모든 id를 빠짐없이 포함. 문자열 안의 큰따옴표는 작은따옴표로 바꿀 것."
+        "- items: 모든 기사를 빠짐없이, 각각 {id, ko_title, summary}.\n"
+        + ("  ko_title은 자연스러운 한국어 제목.\n" if region == "us" else "  ko_title은 빈 문자열로 두세요(원제를 그대로 씀).\n")
+        + "  summary는 제공된 정보만으로 쓴 한국어 한 문장(60자 이내), 추측 금지.\n"
+        "- 어떤 문자열에도 큰따옴표(\")를 쓰지 말고 필요하면 작은따옴표(')를 쓰세요."
     )
     last = None
-    for _ in range(2):                     # 형식이 깨진 답이 오면 한 번 더 요청
+    for attempt in range(3):
+        schema = SCHEMA if attempt < 2 else None   # 스키마가 거절되는 모델이면 마지막엔 없이
         try:
-            data = _parse_json(gemini(prompt))
-            return {"briefing": data.get("briefing") or [], "items": data.get("items") or {}}
-        except (ValueError, json.JSONDecodeError) as e:
+            data = _parse_json(gemini(prompt, schema))
+        except RuntimeError as e:
+            if "HTTP 400" in str(e) and schema and "key" not in str(e).lower():
+                last = e
+                continue
+            raise
+        except ValueError as e:
             last = e
             print(f"  [{where}] 응답 형식 오류, 재시도: {e}")
+            continue
+        raw = data.get("items") or []
+        if isinstance(raw, dict):
+            raw = [dict(v, id=k) for k, v in raw.items() if isinstance(v, dict)]
+        items = {}
+        for it in raw:
+            if isinstance(it, dict) and it.get("id"):
+                d = {"summary": it.get("summary", "")}
+                if region == "us" and it.get("ko_title"):
+                    d["ko_title"] = it["ko_title"]
+                items[it["id"]] = d
+        return {"briefing": data.get("briefing") or [], "items": items}
     raise RuntimeError(f"{where} 요약 형식 오류: {last}")
 
 
