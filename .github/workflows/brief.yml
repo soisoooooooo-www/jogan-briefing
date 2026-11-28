@@ -3,12 +3,15 @@ name: 조간 브리핑 갱신
 on:
   schedule:
     - cron: "17 */2 * * *"   # 2시간마다 (UTC 기준, 매시 17분)
-  workflow_dispatch:          # Actions 탭에서 수동 실행 버튼
+  workflow_dispatch:          # Actions 탭·단축어·cron-job.org에서 실행
+  push:
+    branches: [main]          # 파일을 새로 올리면 바로 다시 빌드
 
 permissions:
   contents: read
   pages: write
   id-token: write
+  actions: write              # 오래된 실행 기록 정리용
 
 concurrency:
   group: pages
@@ -39,3 +42,18 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  cleanup:
+    needs: deploy
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 최근 20개만 남기고 오래된 실행 기록 삭제
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh run list -R "$REPO" --workflow brief.yml --status completed --limit 300 \
+            --json databaseId -q '.[].databaseId' \
+            | tail -n +21 \
+            | while read -r id; do gh run delete "$id" -R "$REPO" || true; done
