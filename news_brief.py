@@ -154,6 +154,51 @@ PAPERS = {
     ],
 }
 
+OP_PER_PAPER = int(os.environ.get("NEWS_OP_PER_PAPER", "3"))
+
+
+def gnews_q(q, lang):
+    tail = "hl=ko&gl=KR&ceid=KR:ko" if lang == "ko" else "hl=en-US&gl=US&ceid=US:en"
+    return f"https://news.google.com/rss/search?q={urllib.parse.quote(q)}&{tail}"
+
+
+def kr_ed(site):
+    return gnews_q(f"intitle:사설 site:{site} when:3d", "ko")
+
+
+def us_op(path):
+    return gnews_q(f"site:{path} when:3d", "en")
+
+
+# 사설·오피니언: 한국은 제목이 [사설]인 글만, 미국은 오피니언면(편집위원회 사설 우선)
+OPINION = [
+    ("The New York Times", "us", ["https://rss.nytimes.com/services/xml/rss/nyt/Opinion.xml", us_op("nytimes.com/opinion")]),
+    ("The Wall Street Journal", "us", ["https://feeds.content.dowjones.io/public/rss/RSSOpinion",
+                                       "https://feeds.a.dj.com/rss/RSSOpinion.xml", us_op("wsj.com/opinion")]),
+    ("The Washington Post", "us", ["https://feeds.washingtonpost.com/rss/opinions", us_op("washingtonpost.com/opinions")]),
+    ("USA Today", "us", [us_op("usatoday.com/opinion")]),
+    ("Los Angeles Times", "us", ["https://www.latimes.com/opinion/rss2.0.xml", us_op("latimes.com/opinion")]),
+    ("조선일보", "kr", ["https://www.chosun.com/arc/outboundfeeds/rss/category/opinion/?outputType=xml", kr_ed("chosun.com")]),
+    ("중앙일보", "kr", [kr_ed("joongang.co.kr")]),
+    ("동아일보", "kr", ["https://rss.donga.com/total.xml", kr_ed("donga.com")]),
+    ("한겨레", "kr", ["https://www.hani.co.kr/rss/opinion/", kr_ed("hani.co.kr")]),
+    ("경향신문", "kr", ["https://www.khan.co.kr/rss/rssdata/opinion_news.xml", kr_ed("khan.co.kr")]),
+    ("한국일보", "kr", [kr_ed("hankookilbo.com")]),
+    ("매일경제", "kr", [kr_ed("mk.co.kr")]),
+]
+_BOARD = re.compile(r"editorial board|the editors|board of editors|editorial", re.I)
+
+
+def is_kr_editorial(it):
+    return bool(re.match(r"\s*[\[［(（]?\s*사설\s*[\]］)）]", it["title"]))
+
+
+def us_board_first(items):
+    def score(it):
+        return 0 if (_BOARD.search(it.get("author", "")) or "/editorial" in it.get("link", "")) else 1
+    return sorted(items, key=score)
+
+
 # ───────────────────────── 피드 수집 ─────────────────────────
 
 TAG_RE = re.compile(r"<[^>]+>")
@@ -203,6 +248,9 @@ def parse_feed(data, is_gnews):
                 f.setdefault("link", c.get("href"))
             elif name in ("category", "subject"):
                 f.setdefault("_cats", []).append((c.text or c.get("term") or "").strip())
+            elif name in ("creator", "author") and "_author" not in f:
+                nm = (c.text or "").strip() or " ".join((x.text or "").strip() for x in c if local(x.tag) == "name")
+                f["_author"] = nm
             elif name not in f:
                 f[name] = (c.text or "").strip()
         title = clean(f.get("title"), 300)
@@ -214,7 +262,7 @@ def parse_feed(data, is_gnews):
             desc = ""  # 구글 뉴스 설명은 링크 목록이라 쓸모없음
         d = parse_date(f.get("pubDate") or f.get("published") or f.get("updated") or f.get("date"))
         items.append({"title": title, "summary": clean(desc), "link": f.get("link", ""),
-                      "ts": d.timestamp() if d else None, "cats": f.get("_cats", [])})
+                      "ts": d.timestamp() if d else None, "cats": f.get("_cats", []), "author": f.get("_author", "")})
     return items
 
 
@@ -224,7 +272,7 @@ def fetch(url):
         return r.read()
 
 
-def fetch_paper(name, urls):
+def fetch_paper(name, urls, kind="news"):
     errors = []
     for url in urls:
         is_g = "news.google.com" in url
@@ -245,8 +293,18 @@ def fetch_paper(name, urls):
                     out.append(it)
             if is_g:  # 구글 뉴스 검색 결과는 최신순으로
                 out.sort(key=lambda i: i["ts"] or 0, reverse=True)
-            return {"paper": name, "via": "Google News" if is_g else "공식 RSS",
-                    "items": [i for i in out if not rule_section(i)][:CANDIDATES], "error": None}
+            if kind == "kr_ed":
+                picked = [i for i in out if is_kr_editorial(i)][:OP_PER_PAPER]
+            elif kind == "us_op":
+                picked = us_board_first(out)[:OP_PER_PAPER]
+            else:
+                picked = [i for i in out if not rule_section(i)][:CANDIDATES]
+            if not picked:
+                errors.append("사설 없음" if kind != "news" else "기사 없음")
+                continue
+            for i in picked:
+                i["board"] = kind == "us_op" and bool(_BOARD.search(i.get("author", "")) or "/editorial" in i.get("link", ""))
+            return {"paper": name, "via": "Google News" if is_g else "공식 RSS", "items": picked, "error": None}
         except Exception as e:
             errors.append(describe(e))
     return {"paper": name, "via": None, "items": [], "error": " / ".join(errors) or "실패"}
@@ -414,6 +472,69 @@ def _enrich_region(region, papers):
     raise RuntimeError(f"{where} 요약 형식 오류: {last}")
 
 
+OP_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "briefing": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+            "headline": {"type": "STRING"}, "detail": {"type": "STRING"}, "outlook": {"type": "STRING"}},
+            "required": ["headline", "detail", "outlook"]}},
+        "items": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+            "id": {"type": "STRING"}, "ko_title": {"type": "STRING"}, "claim": {"type": "STRING"},
+            "summary": {"type": "STRING"}}, "required": ["id", "claim", "summary"]}},
+    },
+    "required": ["briefing", "items"],
+}
+
+
+def _enrich_opinion(papers):
+    lines = []
+    for p in papers:
+        for it in p["items"]:
+            tag = "미국" if p.get("region") == "us" else "한국"
+            board = "·편집위원회" if it.get("board") else ""
+            lines.append(f'[{it["id"]}] ({tag}·{p["paper"]}{board}) {_q(it["title"])} || {_q(it["summary"][:240])}')
+    if not lines:
+        return {"briefing": [], "items": {}}
+    prompt = (
+        "아래는 오늘 한국·미국 주요 일간지의 사설·오피니언 목록입니다. 형식: [id] (지역·신문) 제목 || 요약\n\n"
+        + "\n".join(lines)
+        + "\n\nJSON으로 답하세요.\n"
+        "- briefing: 둘 이상의 신문이 사설로 함께 다룬 쟁점 1~3개(없으면 빈 배열). headline은 쟁점 이름, "
+        "detail은 신문별 입장을 신문 이름과 함께 간결히 비교(어느 쪽이 옳은지 평가하지 말 것), "
+        "outlook은 이 쟁점이 앞으로 어떻게 전개될 수 있는지 1~2문장, 가능성의 형태로.\n"
+        "- items: 모든 글을 빠짐없이, 각각 {id, ko_title, claim, summary}.\n"
+        "  ko_title은 미국 글이면 자연스러운 한국어 제목, 한국 글이면 빈 문자열.\n"
+        "  claim은 이 글의 핵심 주장 한 문장(글쓴이 관점을 그대로 요약, 예: '~해야 한다고 주장'), "
+        "summary는 그 근거 한 문장(60자 이내). 제공된 정보만 사용하고 추측 금지.\n"
+        "- 어떤 문자열에도 큰따옴표(\")를 쓰지 말고 필요하면 작은따옴표(')를 쓰세요."
+    )
+    last = None
+    for attempt in range(3):
+        schema = OP_SCHEMA if attempt < 2 else None
+        try:
+            data = _parse_json(gemini(prompt, schema))
+        except RuntimeError as e:
+            if "HTTP 400" in str(e) and schema and "key" not in str(e).lower():
+                last = e
+                continue
+            raise
+        except ValueError as e:
+            last = e
+            continue
+        raw = data.get("items") or []
+        if isinstance(raw, dict):
+            raw = [dict(v, id=k) for k, v in raw.items() if isinstance(v, dict)]
+        items = {}
+        for it in raw:
+            if isinstance(it, dict) and it.get("id"):
+                d = {"summary": it.get("summary", ""), "claim": it.get("claim", "")}
+                if it.get("ko_title"):
+                    d["ko_title"] = it["ko_title"]
+                items[it["id"]] = d
+        return {"briefing": data.get("briefing") or [], "items": items}
+    raise RuntimeError(f"사설 요약 형식 오류: {last}")
+
+
 def ai_enrich(snapshot):
     out = {"briefing": {}, "items": {}}
     errors = []
@@ -427,6 +548,13 @@ def ai_enrich(snapshot):
         except Exception as e:
             errors.append(str(e)[:160])
             out["briefing"][region] = []
+    try:
+        r = _enrich_opinion(snapshot.get("op", []))
+        out["briefing"]["op"] = r["briefing"]
+        out["items"].update(r["items"])
+    except Exception as e:
+        errors.append(str(e)[:160])
+        out["briefing"]["op"] = []
     if not out["items"] and errors:
         raise RuntimeError(" / ".join(errors))
     if errors:
@@ -443,7 +571,10 @@ LOCK = threading.Lock()
 def collect():
     with ThreadPoolExecutor(max_workers=12) as ex:
         futs = {r: [ex.submit(fetch_paper, n, u) for n, u in PAPERS[r]] for r in PAPERS}
+        futs["op"] = [ex.submit(fetch_paper, n, u, "us_op" if reg == "us" else "kr_ed") for n, reg, u in OPINION]
         snap = {r: [f.result() for f in futs[r]] for r in futs}
+        for p, (_, reg, _) in zip(snap["op"], OPINION):
+            p["region"] = reg
     n = 0
     for r in snap:
         for p in snap[r]:
@@ -451,7 +582,8 @@ def collect():
                 n += 1
                 it["id"] = f"a{n}"
                 it.pop("cats", None)
-            if not API_KEY:
+                it.pop("author", None)
+            if not API_KEY and r != "op":
                 p["items"] = p["items"][:PER_PAPER]
     return snap
 
@@ -459,7 +591,7 @@ def collect():
 def trim(snap, ai):
     """제미나이가 스포츠·연예로 분류한 기사를 빼고 신문사별 PER_PAPER개로 자름."""
     sec = (ai or {}).get("sections", {})
-    for r in snap:
+    for r in ("us", "kr"):
         for p in snap[r]:
             p["items"] = [i for i in p["items"] if sec.get(i["id"], "news") not in EXCLUDE][:PER_PAPER]
 
@@ -535,6 +667,9 @@ button.go{font:700 15px "Noto Sans KR";padding:10px 16px;border:0;background:var
 .it:first-of-type a.t{font:900 19px/1.35 "Noto Serif KR",serif}
 .err{color:var(--acc);font-size:14px}
 .hide{display:none}
+.it .claim{color:var(--ink);font-size:15px;margin-top:6px}
+.it em{font-style:normal;font-weight:700;font-size:12px;color:var(--acc);margin-right:6px}
+.it .tag{display:inline-block;font-size:12px;color:var(--mute);border:1px solid var(--hair);padding:1px 7px;margin-top:5px}
 .chips{display:none;gap:6px;overflow-x:auto;position:sticky;top:0;z-index:5;background:var(--bg);padding:10px 0;margin-top:14px;scrollbar-width:none;border-bottom:1px solid var(--hair)}
 .chips::-webkit-scrollbar,.grid::-webkit-scrollbar{display:none}
 .chip{flex:none;font:500 14px "Noto Sans KR",sans-serif;padding:7px 13px;min-height:36px;border:1px solid var(--hair);border-radius:999px;background:transparent;color:var(--ink);cursor:pointer;white-space:nowrap}
@@ -552,7 +687,7 @@ button.go{font:700 15px "Noto Sans KR";padding:10px 16px;border:0;background:var
 <div class="wrap">
 <header><h1>조간 브리핑</h1><div class="date" id="date"></div></header>
 <div class="bar">
- <div class="tabs"><button class="tab" data-r="all" aria-pressed="true">전체</button><button class="tab" data-r="us" aria-pressed="false">미국</button><button class="tab" data-r="kr" aria-pressed="false">한국</button></div>
+ <div class="tabs"><button class="tab" data-r="all" aria-pressed="true">전체</button><button class="tab" data-r="us" aria-pressed="false">미국</button><button class="tab" data-r="kr" aria-pressed="false">한국</button><button class="tab" data-r="op" aria-pressed="false">사설</button></div>
  <input id="q" placeholder="키워드로 거르기 (예: 관세, AI, Trump)" autocomplete="off">
  <button class="go" id="re">새로 고침</button>
  <div class="status" id="st">불러오는 중…</div>
@@ -572,19 +707,19 @@ function render(){
   const q=$('#q').value.trim().toLowerCase(), ai=D.ai||{}, AI=ai.items||{};
   const b=ai.briefing;
   if(b && !q){
-    const part=(k,t)=>(region==='all'||region===k)&&b[k]?.length?`<div><h3>${t}</h3><ol>${b[k].map(x=>`<li><b>${esc(x.headline)}</b><span>${esc(x.detail)}</span>${x.outlook?`<div class="ol"><em>전망</em>${esc(x.outlook)}</div>`:''}</li>`).join('')}</ol></div>`:'';
-    const parts=part('us','미국 신문들이 주목한 것')+part('kr','한국 신문들이 주목한 것');
-    $('#brief').innerHTML=`<h2>오늘의 핵심</h2><div class="cols2">${parts}</div><p class="note">전망은 기사 내용을 바탕으로 AI가 추정한 가능성이에요. 실제 전개와 다를 수 있어요.</p>`;
+    const part=(k,t)=>((region==='all'&&k!=='op')||region===k)&&b[k]?.length?`<div><h3>${t}</h3><ol>${b[k].map(x=>`<li><b>${esc(x.headline)}</b><span>${esc(x.detail)}</span>${x.outlook?`<div class="ol"><em>전망</em>${esc(x.outlook)}</div>`:''}</li>`).join('')}</ol></div>`:'';
+    const parts=region==='op'?part('op','여러 신문이 사설로 다룬 쟁점'):part('us','미국 신문들이 주목한 것')+part('kr','한국 신문들이 주목한 것');
+    $('#brief').innerHTML=`<h2>${region==='op'?'사설 비교':'오늘의 핵심'}</h2><div class="cols2">${parts}</div><p class="note">전망은 기사 내용을 바탕으로 AI가 추정한 가능성이에요. 실제 전개와 다를 수 있어요.</p>`;
     $('#brief').classList.toggle('hide',!parts);
   } else $('#brief').classList.add('hide');
-  const papers=[...(region!=='kr'?D.data.us:[]),...(region!=='us'?D.data.kr:[])];
+  const papers=region==='op'?(D.data.op||[]):[...(region!=='kr'?D.data.us:[]),...(region!=='us'?D.data.kr:[])];
   $('#grid').innerHTML=papers.map(p=>{
-    const items=p.items.filter(it=>{const a=AI[it.id]||{};return !q||[it.title,it.summary,a.ko_title,a.summary].join(' ').toLowerCase().includes(q)});
+    const items=p.items.filter(it=>{const a=AI[it.id]||{};return !q||[it.title,it.summary,a.ko_title,a.summary,a.claim].join(' ').toLowerCase().includes(q)});
     if(q&&!items.length)return'';
-    const body=p.error?`<div class="err">불러오지 못했어요 (${esc(p.error)})</div>`:items.map(it=>{
+    const body=p.error?`<div class="err">${region==='op'?'오늘 사설을 찾지 못했어요':'불러오지 못했어요'} (${esc(p.error)})</div>`:items.map(it=>{
       const a=AI[it.id]||{}, ko=a.ko_title&&a.ko_title!==it.title;
       const href=/^https?:\/\//.test(it.link)?esc(it.link):'#';
-      return `<div class="it"><a class="t" href="${href}" target="_blank" rel="noopener">${esc(ko?a.ko_title:it.title)}</a>${ko?`<div class="o">${esc(it.title)}</div>`:''}<p>${esc(a.summary||it.summary)}</p><time>${ago(it.ts)}</time></div>`}).join('');
+      return `<div class="it"><a class="t" href="${href}" target="_blank" rel="noopener">${esc(ko?a.ko_title:it.title)}</a>${ko?`<div class="o">${esc(it.title)}</div>`:''}${it.board?'<span class="tag">편집위원회 사설</span>':''}${a.claim?`<p class="claim"><em>주장</em>${esc(a.claim)}</p>`:''}<p>${a.claim&&a.summary?'<em class="why">근거</em>':''}${esc(a.summary||it.summary)}</p><time>${ago(it.ts)}</time></div>`}).join('');
     return `<section class="paper" data-p="${esc(p.paper)}"><div class="ph"><h2>${esc(p.paper)}</h2><span class="via">${esc(p.via||'')}</span></div>${body}</section>`}).join('')||'<p>일치하는 기사가 없어요.</p>';
   const cards=[...document.querySelectorAll('.paper')];
   $('#chips').innerHTML=cards.map((c,i)=>`<button class="chip" data-i="${i}" aria-current="${i===0}">${esc(c.dataset.p)}</button>`).join('')+`<span class="count" id="cnt">1/${cards.length}</span>`;
@@ -723,8 +858,9 @@ def build(out):
         if os.path.exists(src):
             with open(src, "rb") as a, open(os.path.join(out, name), "wb") as b:
                 b.write(a.read())
-    ok = sum(1 for r in data["data"] for p in data["data"][r] if p["items"])
-    print(f"빌드 완료: {out}/index.html  (신문 {ok}곳 수집, AI 요약 {'성공' if data['ai'] else '없음: ' + str(data['ai_error'] or '키 없음')})")
+    ok = sum(1 for r in ("us", "kr") for p in data["data"][r] if p["items"])
+    ops = sum(1 for p in data["data"].get("op", []) if p["items"])
+    print(f"빌드 완료: {out}/index.html  (신문 {ok}곳 수집, 사설 {ops}곳, AI 요약 {'성공' if data['ai'] else '없음: ' + str(data['ai_error'] or '키 없음')})")
 
 
 def cli():
