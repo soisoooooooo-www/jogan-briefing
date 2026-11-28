@@ -44,14 +44,16 @@ _PATH_RE = {
                                 r"television|tv|broadcast|culture/entertainment|showbiz|people)(/|\.|$)", re.I),
 }
 _CAT_WORDS = {
-    "sports": ("sport", "스포츠", "야구", "축구", "골프", "농구", "배구"),
-    "entertainment": ("entertain", "연예", "celebrit", "movies", "television", "music", "arts", "방송", "가요", "영화"),
+    "sports": ("sport", "스포츠", "야구", "축구", "골프", "농구", "배구", "スポーツ", "野球", "サッカー"),
+    "entertainment": ("entertain", "연예", "celebrit", "movies", "television", "music", "arts", "방송", "가요", "영화", "芸能", "エンタメ"),
 }
 _TEXT_MARKS = {
     "sports": ("KBO", "K리그", "프로야구", "MLB", "NBA", "NFL", "EPL", "프리미어리그", "챔피언스리그", "스포츠조선", "일간스포츠",
-               "스포츠서울", "스포츠경향", "스포츠동아", "Super Bowl", "World Series"),
+               "스포츠서울", "스포츠경향", "스포츠동아", "Super Bowl", "World Series",
+               "プロ野球", "Jリーグ", "大相撲", "スポーツ報知", "日刊スポーツ", "スポニチ", "サンスポ", "高校野球"),
     "entertainment": ("OSEN", "엑스포츠뉴스", "스타뉴스", "텐아시아", "마이데일리", "TV리포트", "스포츠조선", "뉴스엔",
-                      "아이돌", "걸그룹", "보이그룹", "컴백", "예능", "드라마", "시청률", "박스오피스", "Box Office", "Grammy", "Oscar"),
+                      "아이돌", "걸그룹", "보이그룹", "컴백", "예능", "드라마", "시청률", "박스오피스", "Box Office", "Grammy", "Oscar",
+                      "芸能", "アイドル", "俳優", "女優", "紅白", "ジャニーズ", "朝ドラ"),
 }
 
 
@@ -128,6 +130,8 @@ def gnews(site, lang):
     """구글 뉴스 RSS에서 특정 신문사 사이트의 최근 1일 기사 — 공식 피드가 없을 때의 대안."""
     if lang == "ko":
         q, tail = f"site:{site} when:1d", "hl=ko&gl=KR&ceid=KR:ko"
+    elif lang == "ja":
+        q, tail = f"site:{site} when:1d", "hl=ja&gl=JP&ceid=JP:ja"
     else:
         q, tail = f"site:{site} when:1d", "hl=en-US&gl=US&ceid=US:en"
     return f"https://news.google.com/rss/search?q={urllib.parse.quote(q)}&{tail}"
@@ -151,6 +155,14 @@ PAPERS = {
         ("경향신문", ["https://www.khan.co.kr/rss/rssdata/total_news.xml", gnews("khan.co.kr", "ko")]),
         ("한국일보", [gnews("hankookilbo.com", "ko")]),
         ("매일경제", ["https://www.mk.co.kr/rss/30000001/", gnews("mk.co.kr", "ko")]),
+    ],
+    "jp": [
+        ("요미우리신문", [gnews("yomiuri.co.jp", "ja")]),
+        ("아사히신문", ["https://www.asahi.com/rss/asahi/newsheadlines.rdf", gnews("asahi.com", "ja")]),
+        ("마이니치신문", ["https://mainichi.jp/rss/etc/mainichi-flash.rss", gnews("mainichi.jp", "ja")]),
+        ("니혼게이자이(닛케이)", [gnews("nikkei.com", "ja")]),
+        ("산케이신문", [gnews("sankei.com", "ja")]),
+        ("NHK", ["https://www3.nhk.or.jp/rss/news/cat0.xml", gnews("www3.nhk.or.jp", "ja")]),
     ],
 }
 
@@ -431,7 +443,7 @@ def _enrich_region(region, papers):
             lines.append(f'[{it["id"]}] ({p["paper"]}) {_q(it["title"])} || {_q(it["summary"][:160])}')
     if not lines:
         return {"briefing": [], "items": {}}
-    where = "미국" if region == "us" else "한국"
+    where = {"us": "미국", "kr": "한국", "jp": "일본"}[region]
     prompt = (
         f"아래는 오늘 {where} 주요 일간지의 헤드라인 목록입니다. 형식: [id] (신문) 제목 || RSS 요약\n\n"
         + "\n".join(lines)
@@ -441,12 +453,12 @@ def _enrich_region(region, papers):
         "- briefing의 outlook: 이 이슈로 앞으로 일어날 수 있는 일과 기대효과·파급효과를 2~3문장으로. "
         "가능한 전개를 '~할 가능성', '~가 관건'처럼 조건과 불확실성을 드러내 쓰고, 단정하지 말 것. "
         "정치적 쟁점은 특정 입장을 지지하거나 평가하지 말고 각 측이 예상하는 결과를 균형 있게. "
-        + ("미국 이슈는 한국(경제·산업·외교)에 미칠 수 있는 영향이 있으면 한 문장 포함. " if region == "us" else "")
+        + ("이 이슈가 한국(경제·산업·외교)에 미칠 수 있는 영향이 있으면 한 문장 포함. " if region != "kr" else "")
         + "기사에 없는 구체적 수치·날짜를 지어내지 말 것.\n"
         "- items: 모든 기사를 빠짐없이, 각각 {id, ko_title, summary, section}.\n"
         "  section은 스포츠(경기·선수·구단·리그) 기사면 sports, 연예·방송·영화·음악·셀럽 기사면 entertainment, 그 밖은 news. "
         "스포츠·연예 산업의 경제·정책 기사(예: 중계권 규제, 구단 매각 세금)는 news.\n"
-        + ("  ko_title은 자연스러운 한국어 제목.\n" if region == "us" else "  ko_title은 빈 문자열로 두세요(원제를 그대로 씀).\n")
+        + ("  ko_title은 자연스러운 한국어 제목.\n" if region != "kr" else "  ko_title은 빈 문자열로 두세요(원제를 그대로 씀).\n")
         + "  summary는 제공된 정보만으로 쓴 한국어 한 문장(60자 이내), 추측 금지.\n"
         "- 어떤 문자열에도 큰따옴표(\")를 쓰지 말고 필요하면 작은따옴표(')를 쓰세요."
     )
@@ -471,7 +483,7 @@ def _enrich_region(region, papers):
         for it in raw:
             if isinstance(it, dict) and it.get("id"):
                 d = {"summary": it.get("summary", ""), "section": it.get("section") or "news"}
-                if region == "us" and it.get("ko_title"):
+                if region != "kr" and it.get("ko_title"):
                     d["ko_title"] = it["ko_title"]
                 items[it["id"]] = d
         return {"briefing": data.get("briefing") or [], "items": items}
@@ -555,7 +567,7 @@ def _enrich_opinion(papers):
 def ai_enrich(snapshot):
     out = {"briefing": {}, "items": {}}
     errors = []
-    for region in ("us", "kr"):
+    for region in ("us", "kr", "jp"):
         try:
             r = _enrich_region(region, snapshot[region])
             out["briefing"][region] = r["briefing"]
@@ -608,7 +620,7 @@ def collect():
 def trim(snap, ai):
     """제미나이가 스포츠·연예로 분류한 기사를 빼고 신문사별 PER_PAPER개로 자름."""
     sec = (ai or {}).get("sections", {})
-    for r in ("us", "kr"):
+    for r in ("us", "kr", "jp"):
         for p in snap[r]:
             p["items"] = [i for i in p["items"] if sec.get(i["id"], "news") not in EXCLUDE][:PER_PAPER]
 
@@ -652,7 +664,7 @@ PAGE = r"""<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8">
 :root{color-scheme:light dark;--bg:light-dark(#f7f5f0,#111110);--paper:light-dark(#fff,#1b1a18);--ink:light-dark(#151412,#ece8e1);
 --mute:light-dark(#6b665e,#a29c92);--rule:light-dark(#151412,#ece8e1);--hair:light-dark(#dcd7cd,#34312c);--acc:#c8102e}
 *{box-sizing:border-box;min-width:0}
-body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 "Noto Sans KR",system-ui,sans-serif}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 "Noto Sans KR","Hiragino Sans","Noto Sans JP",system-ui,sans-serif}
 a{color:inherit;text-decoration:none}a:hover{text-decoration:underline}
 .wrap{max-width:1240px;margin:0 auto;padding:0 max(4vw,16px)}
 header{border-bottom:4px double var(--rule);padding:28px 0 14px;text-align:center}
@@ -709,7 +721,7 @@ button.go{font:700 15px "Noto Sans KR";padding:10px 16px;border:0;background:var
 <div class="wrap">
 <header><h1>조간 브리핑</h1><div class="date" id="date"></div></header>
 <div class="bar">
- <div class="tabs"><button class="tab" data-r="all" aria-pressed="true">전체</button><button class="tab" data-r="us" aria-pressed="false">미국</button><button class="tab" data-r="kr" aria-pressed="false">한국</button><button class="tab" data-r="op" aria-pressed="false">사설</button></div>
+ <div class="tabs"><button class="tab" data-r="all" aria-pressed="true">전체</button><button class="tab" data-r="us" aria-pressed="false">미국</button><button class="tab" data-r="kr" aria-pressed="false">한국</button><button class="tab" data-r="jp" aria-pressed="false">일본</button><button class="tab" data-r="op" aria-pressed="false">사설</button></div>
  <input id="q" placeholder="키워드로 거르기 (예: 관세, AI, Trump)" autocomplete="off">
  <button class="go" id="re">새로 고침</button>
  <div class="status" id="st">불러오는 중…</div>
@@ -723,18 +735,18 @@ button.go{font:700 15px "Noto Sans KR";padding:10px 16px;border:0;background:var
 const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let D=null, region='all';
 $('#date').textContent=new Date().toLocaleDateString('ko-KR',{year:'numeric',month:'long',day:'numeric',weekday:'long'});
-const ago=ts=>{if(!ts)return'';const m=Math.round((Date.now()/1000-ts)/60);return m<60?m+'분 전':m<1440?Math.round(m/60)+'시간 전':Math.round(m/1440)+'일 전'};
+const ago=ts=>{if(!ts)return'';const m=Math.round((Date.now()/1000-ts)/60);return m<1?'방금':m<60?m+'분 전':m<1440?Math.round(m/60)+'시간 전':Math.round(m/1440)+'일 전'};
 function render(){
   if(!D||!D.data)return;
   const q=$('#q').value.trim().toLowerCase(), ai=D.ai||{}, AI=ai.items||{};
   const b=ai.briefing;
   if(b && !q){
     const part=(k,t)=>((region==='all'&&k!=='op')||region===k)&&b[k]?.length?`<div><h3>${t}</h3><ol>${b[k].map(x=>`<li><b>${esc(x.headline)}</b><span>${esc(x.detail)}</span>${x.outlook?`<div class="ol"><em>전망</em>${esc(x.outlook)}</div>`:''}</li>`).join('')}</ol></div>`:'';
-    const parts=region==='op'?part('op','여러 신문이 사설로 다룬 쟁점'):part('us','미국 신문들이 주목한 것')+part('kr','한국 신문들이 주목한 것');
+    const parts=region==='op'?part('op','여러 신문이 사설로 다룬 쟁점'):part('us','미국 신문들이 주목한 것')+part('kr','한국 신문들이 주목한 것')+part('jp','일본 신문들이 주목한 것');
     $('#brief').innerHTML=`<h2>${region==='op'?'사설 비교':'오늘의 핵심'}</h2><div class="cols2">${parts}</div><p class="note">전망은 기사 내용을 바탕으로 AI가 추정한 가능성이에요. 실제 전개와 다를 수 있어요.</p>`;
     $('#brief').classList.toggle('hide',!parts);
   } else $('#brief').classList.add('hide');
-  const papers=region==='op'?(D.data.op||[]):[...(region!=='kr'?D.data.us:[]),...(region!=='us'?D.data.kr:[])];
+  const papers=region==='all'?[...D.data.us,...D.data.kr,...(D.data.jp||[])]:(D.data[region]||[]);
   $('#grid').innerHTML=papers.map(p=>{
     const items=p.items.filter(it=>{const a=AI[it.id]||{};return !q||[it.title,it.summary,a.ko_title,a.summary,a.claim,(a.vocab||[]).map(v=>v.en+' '+v.ko).join(' ')].join(' ').toLowerCase().includes(q)});
     if(q&&!items.length)return'';
@@ -880,7 +892,7 @@ def build(out):
         if os.path.exists(src):
             with open(src, "rb") as a, open(os.path.join(out, name), "wb") as b:
                 b.write(a.read())
-    ok = sum(1 for r in ("us", "kr") for p in data["data"][r] if p["items"])
+    ok = sum(1 for r in ("us", "kr", "jp") for p in data["data"][r] if p["items"])
     ops = sum(1 for p in data["data"].get("op", []) if p["items"])
     print(f"빌드 완료: {out}/index.html  (신문 {ok}곳 수집, 사설 {ops}곳, AI 요약 {'성공' if data['ai'] else '없음: ' + str(data['ai_error'] or '키 없음')})")
 
