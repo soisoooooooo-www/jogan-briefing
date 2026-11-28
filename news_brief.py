@@ -480,7 +480,11 @@ OP_SCHEMA = {
             "required": ["headline", "detail", "outlook"]}},
         "items": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
             "id": {"type": "STRING"}, "ko_title": {"type": "STRING"}, "claim": {"type": "STRING"},
-            "summary": {"type": "STRING"}}, "required": ["id", "claim", "summary"]}},
+            "summary": {"type": "STRING"},
+            "vocab": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+                "en": {"type": "STRING"}, "ko": {"type": "STRING"}, "tip": {"type": "STRING"}},
+                "required": ["en", "ko"]}}},
+            "required": ["id", "claim", "summary"]}},
     },
     "required": ["briefing", "items"],
 }
@@ -502,7 +506,10 @@ def _enrich_opinion(papers):
         "- briefing: 둘 이상의 신문이 사설로 함께 다룬 쟁점 1~3개(없으면 빈 배열). headline은 쟁점 이름, "
         "detail은 신문별 입장을 신문 이름과 함께 간결히 비교(어느 쪽이 옳은지 평가하지 말 것), "
         "outlook은 이 쟁점이 앞으로 어떻게 전개될 수 있는지 1~2문장, 가능성의 형태로.\n"
-        "- items: 모든 글을 빠짐없이, 각각 {id, ko_title, claim, summary}.\n"
+        "- items: 모든 글을 빠짐없이, 각각 {id, ko_title, claim, summary, vocab}.\n"
+        "  vocab은 미국 글에만: 제목과 요약에 실제로 나온 영어 표현 중 영어 학습에 가치 있는 단어·숙어 3개"
+        "(너무 쉬운 단어나 고유명사 제외). en은 원문에 나온 형태 그대로, ko는 이 글의 문맥에 맞는 뜻, "
+        "tip은 쓰임이나 뉘앙스를 20자 이내로. 한국 글은 빈 배열.\n"
         "  ko_title은 미국 글이면 자연스러운 한국어 제목, 한국 글이면 빈 문자열.\n"
         "  claim은 이 글의 핵심 주장 한 문장(글쓴이 관점을 그대로 요약, 예: '~해야 한다고 주장'), "
         "summary는 그 근거 한 문장(60자 이내). 제공된 정보만 사용하고 추측 금지.\n"
@@ -528,6 +535,9 @@ def _enrich_opinion(papers):
         for it in raw:
             if isinstance(it, dict) and it.get("id"):
                 d = {"summary": it.get("summary", ""), "claim": it.get("claim", "")}
+                voc = [v for v in (it.get("vocab") or []) if isinstance(v, dict) and v.get("en") and v.get("ko")][:3]
+                if voc:
+                    d["vocab"] = [{"en": v["en"], "ko": v["ko"], "tip": v.get("tip", "")} for v in voc]
                 if it.get("ko_title"):
                     d["ko_title"] = it["ko_title"]
                 items[it["id"]] = d
@@ -669,6 +679,12 @@ button.go{font:700 15px "Noto Sans KR";padding:10px 16px;border:0;background:var
 .hide{display:none}
 .it .claim{color:var(--ink);font-size:15px;margin-top:6px}
 .it em{font-style:normal;font-weight:700;font-size:12px;color:var(--acc);margin-right:6px}
+.voc{list-style:none;margin:8px 0 4px;padding:10px 12px;background:var(--paper);border:1px solid var(--hair)}
+.voc li{display:flex;flex-wrap:wrap;gap:2px 8px;align-items:baseline;padding:3px 0;font-size:14px}
+.voc .vh{font-size:12px;font-weight:700;color:var(--acc);padding:0 0 4px}
+.voc b{font-family:Georgia,"Noto Serif KR",serif;font-size:15px}
+.voc span{color:var(--ink)}
+.voc i{font-style:normal;color:var(--mute);font-size:13px;flex-basis:100%}
 .it .tag{display:inline-block;font-size:12px;color:var(--mute);border:1px solid var(--hair);padding:1px 7px;margin-top:5px}
 .chips{display:none;gap:6px;overflow-x:auto;position:sticky;top:0;z-index:5;background:var(--bg);padding:10px 0;margin-top:14px;scrollbar-width:none;border-bottom:1px solid var(--hair)}
 .chips::-webkit-scrollbar,.grid::-webkit-scrollbar{display:none}
@@ -714,12 +730,12 @@ function render(){
   } else $('#brief').classList.add('hide');
   const papers=region==='op'?(D.data.op||[]):[...(region!=='kr'?D.data.us:[]),...(region!=='us'?D.data.kr:[])];
   $('#grid').innerHTML=papers.map(p=>{
-    const items=p.items.filter(it=>{const a=AI[it.id]||{};return !q||[it.title,it.summary,a.ko_title,a.summary,a.claim].join(' ').toLowerCase().includes(q)});
+    const items=p.items.filter(it=>{const a=AI[it.id]||{};return !q||[it.title,it.summary,a.ko_title,a.summary,a.claim,(a.vocab||[]).map(v=>v.en+' '+v.ko).join(' ')].join(' ').toLowerCase().includes(q)});
     if(q&&!items.length)return'';
     const body=p.error?`<div class="err">${region==='op'?'오늘 사설을 찾지 못했어요':'불러오지 못했어요'} (${esc(p.error)})</div>`:items.map(it=>{
       const a=AI[it.id]||{}, ko=a.ko_title&&a.ko_title!==it.title;
       const href=/^https?:\/\//.test(it.link)?esc(it.link):'#';
-      return `<div class="it"><a class="t" href="${href}" target="_blank" rel="noopener">${esc(ko?a.ko_title:it.title)}</a>${ko?`<div class="o">${esc(it.title)}</div>`:''}${it.board?'<span class="tag">편집위원회 사설</span>':''}${a.claim?`<p class="claim"><em>주장</em>${esc(a.claim)}</p>`:''}<p>${a.claim&&a.summary?'<em class="why">근거</em>':''}${esc(a.summary||it.summary)}</p><time>${ago(it.ts)}</time></div>`}).join('');
+      return `<div class="it"><a class="t" href="${href}" target="_blank" rel="noopener">${esc(ko?a.ko_title:it.title)}</a>${ko?`<div class="o">${esc(it.title)}</div>`:''}${it.board?'<span class="tag">편집위원회 사설</span>':''}${a.claim?`<p class="claim"><em>주장</em>${esc(a.claim)}</p>`:''}<p>${a.claim&&a.summary?'<em class="why">근거</em>':''}${esc(a.summary||it.summary)}</p>${a.vocab?.length?`<ul class="voc"><li class="vh">핵심 표현</li>${a.vocab.map(v=>`<li><b lang="en">${esc(v.en)}</b><span>${esc(v.ko)}</span>${v.tip?`<i>${esc(v.tip)}</i>`:''}</li>`).join('')}</ul>`:''}<time>${ago(it.ts)}</time></div>`}).join('');
     return `<section class="paper" data-p="${esc(p.paper)}"><div class="ph"><h2>${esc(p.paper)}</h2><span class="via">${esc(p.via||'')}</span></div>${body}</section>`}).join('')||'<p>일치하는 기사가 없어요.</p>';
   const cards=[...document.querySelectorAll('.paper')];
   $('#chips').innerHTML=cards.map((c,i)=>`<button class="chip" data-i="${i}" aria-current="${i===0}">${esc(c.dataset.p)}</button>`).join('')+`<span class="count" id="cnt">1/${cards.length}</span>`;
