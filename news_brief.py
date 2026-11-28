@@ -170,14 +170,17 @@ def us_op(path):
     return gnews_q(f"site:{path} when:3d", "en")
 
 
-# 사설·오피니언: 한국은 제목이 [사설]인 글만, 미국은 오피니언면(편집위원회 사설 우선)
+def en_q(q):
+    return gnews_q(q + " when:3d", "en")
+
+
+# 사설: 한국 신문은 제목이 [사설]인 글만, 영어 매체는 구독 없이 원문을 읽을 수 있는 곳만(편집위원회 사설 우선)
 OPINION = [
-    ("The New York Times", "us", ["https://rss.nytimes.com/services/xml/rss/nyt/Opinion.xml", us_op("nytimes.com/opinion")]),
-    ("The Wall Street Journal", "us", ["https://feeds.content.dowjones.io/public/rss/RSSOpinion",
-                                       "https://feeds.a.dj.com/rss/RSSOpinion.xml", us_op("wsj.com/opinion")]),
-    ("The Washington Post", "us", ["https://feeds.washingtonpost.com/rss/opinions", us_op("washingtonpost.com/opinions")]),
-    ("USA Today", "us", [us_op("usatoday.com/opinion")]),
-    ("Los Angeles Times", "us", ["https://www.latimes.com/opinion/rss2.0.xml", us_op("latimes.com/opinion")]),
+    ("USA Today", "en", [en_q("site:usatoday.com/opinion")]),
+    ("The Guardian", "en", ["https://www.theguardian.com/profile/editorial/rss",
+                            en_q('intitle:"The Guardian view" site:theguardian.com')]),
+    ("Korea Herald", "en", [en_q('intitle:Editorial site:koreaherald.com')]),
+    ("Korea JoongAng Daily", "en", [en_q("editorial site:koreajoongangdaily.joins.com")]),
     ("조선일보", "kr", ["https://www.chosun.com/arc/outboundfeeds/rss/category/opinion/?outputType=xml", kr_ed("chosun.com")]),
     ("중앙일보", "kr", [kr_ed("joongang.co.kr")]),
     ("동아일보", "kr", ["https://rss.donga.com/total.xml", kr_ed("donga.com")]),
@@ -187,6 +190,11 @@ OPINION = [
     ("매일경제", "kr", [kr_ed("mk.co.kr")]),
 ]
 _BOARD = re.compile(r"editorial board|the editors|board of editors|editorial", re.I)
+_ED_TITLE = re.compile(r"^\s*(\[editorial\]|editorial\s*[:|]|the guardian view)", re.I)
+
+
+def is_board(it):
+    return bool(_BOARD.search(it.get("author", "")) or "/editorial" in it.get("link", "") or _ED_TITLE.search(it["title"]))
 
 
 def is_kr_editorial(it):
@@ -194,9 +202,7 @@ def is_kr_editorial(it):
 
 
 def us_board_first(items):
-    def score(it):
-        return 0 if (_BOARD.search(it.get("author", "")) or "/editorial" in it.get("link", "")) else 1
-    return sorted(items, key=score)
+    return sorted(items, key=lambda it: 0 if is_board(it) else 1)
 
 
 # ───────────────────────── 피드 수집 ─────────────────────────
@@ -295,7 +301,7 @@ def fetch_paper(name, urls, kind="news"):
                 out.sort(key=lambda i: i["ts"] or 0, reverse=True)
             if kind == "kr_ed":
                 picked = [i for i in out if is_kr_editorial(i)][:OP_PER_PAPER]
-            elif kind == "us_op":
+            elif kind == "en_op":
                 picked = us_board_first(out)[:OP_PER_PAPER]
             else:
                 picked = [i for i in out if not rule_section(i)][:CANDIDATES]
@@ -303,7 +309,7 @@ def fetch_paper(name, urls, kind="news"):
                 errors.append("사설 없음" if kind != "news" else "기사 없음")
                 continue
             for i in picked:
-                i["board"] = kind == "us_op" and bool(_BOARD.search(i.get("author", "")) or "/editorial" in i.get("link", ""))
+                i["board"] = kind == "en_op" and is_board(i)
             return {"paper": name, "via": "Google News" if is_g else "공식 RSS", "items": picked, "error": None}
         except Exception as e:
             errors.append(describe(e))
@@ -482,7 +488,7 @@ OP_SCHEMA = {
             "id": {"type": "STRING"}, "ko_title": {"type": "STRING"}, "claim": {"type": "STRING"},
             "summary": {"type": "STRING"},
             "vocab": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
-                "en": {"type": "STRING"}, "ko": {"type": "STRING"}, "tip": {"type": "STRING"}},
+                "en": {"type": "STRING"}, "ko": {"type": "STRING"}},
                 "required": ["en", "ko"]}}},
             "required": ["id", "claim", "summary"]}},
     },
@@ -494,23 +500,24 @@ def _enrich_opinion(papers):
     lines = []
     for p in papers:
         for it in p["items"]:
-            tag = "미국" if p.get("region") == "us" else "한국"
+            tag = "영어" if p.get("region") == "en" else "한국"
             board = "·편집위원회" if it.get("board") else ""
             lines.append(f'[{it["id"]}] ({tag}·{p["paper"]}{board}) {_q(it["title"])} || {_q(it["summary"][:240])}')
     if not lines:
         return {"briefing": [], "items": {}}
     prompt = (
-        "아래는 오늘 한국·미국 주요 일간지의 사설·오피니언 목록입니다. 형식: [id] (지역·신문) 제목 || 요약\n\n"
+        "아래는 오늘 한국 주요 일간지와 영어 매체의 사설·오피니언 목록입니다. 형식: [id] (지역·신문) 제목 || 요약\n\n"
         + "\n".join(lines)
         + "\n\nJSON으로 답하세요.\n"
         "- briefing: 둘 이상의 신문이 사설로 함께 다룬 쟁점 1~3개(없으면 빈 배열). headline은 쟁점 이름, "
         "detail은 신문별 입장을 신문 이름과 함께 간결히 비교(어느 쪽이 옳은지 평가하지 말 것), "
         "outlook은 이 쟁점이 앞으로 어떻게 전개될 수 있는지 1~2문장, 가능성의 형태로.\n"
         "- items: 모든 글을 빠짐없이, 각각 {id, ko_title, claim, summary, vocab}.\n"
-        "  vocab은 미국 글에만: 제목과 요약에 실제로 나온 영어 표현 중 영어 학습에 가치 있는 단어·숙어 3개"
-        "(너무 쉬운 단어나 고유명사 제외). en은 원문에 나온 형태 그대로, ko는 이 글의 문맥에 맞는 뜻, "
-        "tip은 쓰임이나 뉘앙스를 20자 이내로. 한국 글은 빈 배열.\n"
-        "  ko_title은 미국 글이면 자연스러운 한국어 제목, 한국 글이면 빈 문자열.\n"
+        "  vocab은 영어 글에만: 제목과 요약에 실제로 나온 영어 표현 중 영어 학습에 가치 있는 단어·숙어 최대 3개. "
+        "수능·토익 기본 수준(예: export, access, benefit, investigate)은 빼고 중상급 이상 어휘나 관용 표현, 구동사 위주로. "
+        "고유명사 제외, 마땅한 표현이 없으면 개수를 줄여도 됨. en은 원문에 나온 형태 그대로, ko는 이 글의 문맥에 맞는 짧은 뜻. "
+        "한국 글은 빈 배열.\n"
+        "  ko_title은 영어 글이면 자연스러운 한국어 제목, 한국 글이면 빈 문자열.\n"
         "  claim은 이 글의 핵심 주장 한 문장(글쓴이 관점을 그대로 요약, 예: '~해야 한다고 주장'), "
         "summary는 그 근거 한 문장(60자 이내). 제공된 정보만 사용하고 추측 금지.\n"
         "- 어떤 문자열에도 큰따옴표(\")를 쓰지 말고 필요하면 작은따옴표(')를 쓰세요."
@@ -537,7 +544,7 @@ def _enrich_opinion(papers):
                 d = {"summary": it.get("summary", ""), "claim": it.get("claim", "")}
                 voc = [v for v in (it.get("vocab") or []) if isinstance(v, dict) and v.get("en") and v.get("ko")][:3]
                 if voc:
-                    d["vocab"] = [{"en": v["en"], "ko": v["ko"], "tip": v.get("tip", "")} for v in voc]
+                    d["vocab"] = [{"en": v["en"], "ko": v["ko"]} for v in voc]
                 if it.get("ko_title"):
                     d["ko_title"] = it["ko_title"]
                 items[it["id"]] = d
@@ -581,7 +588,7 @@ LOCK = threading.Lock()
 def collect():
     with ThreadPoolExecutor(max_workers=12) as ex:
         futs = {r: [ex.submit(fetch_paper, n, u) for n, u in PAPERS[r]] for r in PAPERS}
-        futs["op"] = [ex.submit(fetch_paper, n, u, "us_op" if reg == "us" else "kr_ed") for n, reg, u in OPINION]
+        futs["op"] = [ex.submit(fetch_paper, n, u, "en_op" if reg == "en" else "kr_ed") for n, reg, u in OPINION]
         snap = {r: [f.result() for f in futs[r]] for r in futs}
         for p, (_, reg, _) in zip(snap["op"], OPINION):
             p["region"] = reg
@@ -679,12 +686,11 @@ button.go{font:700 15px "Noto Sans KR";padding:10px 16px;border:0;background:var
 .hide{display:none}
 .it .claim{color:var(--ink);font-size:15px;margin-top:6px}
 .it em{font-style:normal;font-weight:700;font-size:12px;color:var(--acc);margin-right:6px}
-.voc{list-style:none;margin:8px 0 4px;padding:10px 12px;background:var(--paper);border:1px solid var(--hair)}
-.voc li{display:flex;flex-wrap:wrap;gap:2px 8px;align-items:baseline;padding:3px 0;font-size:14px}
-.voc .vh{font-size:12px;font-weight:700;color:var(--acc);padding:0 0 4px}
-.voc b{font-family:Georgia,"Noto Serif KR",serif;font-size:15px}
+.voc{list-style:none;margin:6px 0 2px;padding:5px 9px;background:var(--paper);border:1px solid var(--hair);
+ display:flex;flex-wrap:wrap;gap:2px 14px;align-items:baseline;font-size:13px;line-height:1.5}
+.voc .vh{font-size:11px;font-weight:700;color:var(--acc)}
+.voc b{font-family:Georgia,"Noto Serif KR",serif;font-size:14px;margin-right:4px}
 .voc span{color:var(--ink)}
-.voc i{font-style:normal;color:var(--mute);font-size:13px;flex-basis:100%}
 .it .tag{display:inline-block;font-size:12px;color:var(--mute);border:1px solid var(--hair);padding:1px 7px;margin-top:5px}
 .chips{display:none;gap:6px;overflow-x:auto;position:sticky;top:0;z-index:5;background:var(--bg);padding:10px 0;margin-top:14px;scrollbar-width:none;border-bottom:1px solid var(--hair)}
 .chips::-webkit-scrollbar,.grid::-webkit-scrollbar{display:none}
@@ -735,7 +741,7 @@ function render(){
     const body=p.error?`<div class="err">${region==='op'?'오늘 사설을 찾지 못했어요':'불러오지 못했어요'} (${esc(p.error)})</div>`:items.map(it=>{
       const a=AI[it.id]||{}, ko=a.ko_title&&a.ko_title!==it.title;
       const href=/^https?:\/\//.test(it.link)?esc(it.link):'#';
-      return `<div class="it"><a class="t" href="${href}" target="_blank" rel="noopener">${esc(ko?a.ko_title:it.title)}</a>${ko?`<div class="o">${esc(it.title)}</div>`:''}${it.board?'<span class="tag">편집위원회 사설</span>':''}${a.claim?`<p class="claim"><em>주장</em>${esc(a.claim)}</p>`:''}<p>${a.claim&&a.summary?'<em class="why">근거</em>':''}${esc(a.summary||it.summary)}</p>${a.vocab?.length?`<ul class="voc"><li class="vh">핵심 표현</li>${a.vocab.map(v=>`<li><b lang="en">${esc(v.en)}</b><span>${esc(v.ko)}</span>${v.tip?`<i>${esc(v.tip)}</i>`:''}</li>`).join('')}</ul>`:''}<time>${ago(it.ts)}</time></div>`}).join('');
+      return `<div class="it"><a class="t" href="${href}" target="_blank" rel="noopener">${esc(ko?a.ko_title:it.title)}</a>${ko?`<div class="o">${esc(it.title)}</div>`:''}${it.board?'<span class="tag">편집위원회 사설</span>':''}${a.claim?`<p class="claim"><em>주장</em>${esc(a.claim)}</p>`:''}<p>${a.claim&&a.summary?'<em class="why">근거</em>':''}${esc(a.summary||it.summary)}</p>${a.vocab?.length?`<ul class="voc"><li class="vh">핵심 표현</li>${a.vocab.map(v=>`<li><b lang="en">${esc(v.en)}</b><span>${esc(v.ko)}</span></li>`).join('')}</ul>`:''}<time>${ago(it.ts)}</time></div>`}).join('');
     return `<section class="paper" data-p="${esc(p.paper)}"><div class="ph"><h2>${esc(p.paper)}</h2><span class="via">${esc(p.via||'')}</span></div>${body}</section>`}).join('')||'<p>일치하는 기사가 없어요.</p>';
   const cards=[...document.querySelectorAll('.paper')];
   $('#chips').innerHTML=cards.map((c,i)=>`<button class="chip" data-i="${i}" aria-current="${i===0}">${esc(c.dataset.p)}</button>`).join('')+`<span class="count" id="cnt">1/${cards.length}</span>`;
