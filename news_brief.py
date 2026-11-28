@@ -648,7 +648,17 @@ if(window.__DATA__){
   // 정적(GitHub Pages) 모드: 버튼은 GitHub에서 새 수집을 실행하는 화면을 연다
   const user=location.hostname.split('.')[0], repo=location.pathname.split('/').filter(Boolean)[0]||'jogan-briefing';
   const btn=$('#re'); btn.textContent='지금 갱신하기';
-  btn.onclick=()=>{location.href=`https://github.com/${user}/${repo}/actions/workflows/brief.yml`};
+  // 아이폰·아이패드·맥: '조간 브리핑 갱신' 단축어를 실행(토큰은 단축어 안에만 있음). 그 밖의 기기: GitHub 실행 화면.
+  const apple=/iPhone|iPad|iPod|Macintosh/.test(navigator.userAgent);
+  const SHORTCUT='조간 브리핑 갱신';
+  btn.onclick=()=>{
+    if(apple){
+      location.href='shortcuts://run-shortcut?name='+encodeURIComponent(SHORTCUT);
+      $('#st').textContent='갱신 요청을 보냈어요. 1~2분 뒤 새로 고침하면 새 기사가 보여요.';
+    } else {
+      location.href=`https://github.com/${user}/${repo}/actions/workflows/brief.yml`;
+    }
+  };
   // 홈 화면 앱은 예전 화면을 그대로 띄우는 경우가 많아, 다시 열 때 10분 넘었으면 새로 받아온다
   const opened=Date.now();
   document.addEventListener('visibilitychange',()=>{
